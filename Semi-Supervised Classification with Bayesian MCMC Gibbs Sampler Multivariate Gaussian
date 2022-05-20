@@ -1,0 +1,133 @@
+#Semi-Supervised Classification with Bayesian MCMC Gibbs Sampler Multivariate Gaussian
+library(mvtnorm)
+library(ellipse)
+library(MCMCpack)
+
+#Generate practice data for testing
+#w = c(.6,.4)
+#mu.true = array(0,dim = c(2,2))
+#mu.true[1,] = c(1,1)
+#mu.true[2,] = c(10,10)
+#Sigma.true = array(0,dim = c(2,2,2))
+#Sigma.true[1,,] = array(c(1,.7,.7,1),dim = c(2,2))
+#Sigma.true[2,,] = array(c(1,-.2,-.2,1),dim = c(2,2))
+#n = 30
+#m = 170
+#ind = rep(0,(n+m))
+#x = array(0,c(n+m,2))
+#Sampling the data
+#for(i in 1:(n+m)) {
+#  ind[i] = sample(1:2,1,replace = T,prob = w)
+#  x[i,] = rmvnorm(1,mean = mu.true[ind[i],],sigma = Sigma.true[ind[i],,])
+#  
+#}
+#labels = ind
+#labels.known = labels[1:n]
+#labels.test = labels[(n+1):n]
+#*/
+
+#Data from Course
+load("~/Downloads/bancknotes.Rdata")
+x = rbind(banknote.training,banknote.test)
+n = nrow(banknote.training)
+m = nrow(banknote.test)
+labels.known = as.numeric(banknote.training.labels)
+labels.test = as.numeric(banknote.test.labels)
+labels = c(labels.known,labels.test)
+
+
+#2 mixtures
+num_mix = 2
+#6 features
+num_features = ncol(x)
+
+
+## Initialize the parameters
+w = rep(1,num_mix)/num_mix  #Assign equal weight to each component to start with
+mu = rmvnorm(num_mix, apply(x,2,mean), var(x))   #Randomly initialise means
+Sigma = array(0, dim=c(num_mix,num_features,num_features))  
+for(k in 1:num_mix) {
+  Sigma[k,,] = var(x)/num_mix  #All variances the same to begin
+}
+cc = rep(0,n+m)
+cc[1:n]    = labels.known  #Know these indicators a priori
+cc[(n+1):(n+m)]= sample(1:num_mix, m, replace=TRUE, prob=w) #Initialise random indicators
+
+# Priors  - empirical bayes approach
+aa = rep(1, num_mix) #Uniform prior on mixture
+dd = apply(x,2,mean) #mean of data as prior on mean
+DD = 10*var(x) #10* Variance to make sufficiently diffuse 
+nu = num_features #Degrees of freedom
+SS = var(x)/num_features #Scale
+
+# Number of iteration of the sampler - burn to get converged samples
+num_samples = 6000
+burn = 1000
+
+# Storing the samples
+cc.out    = array(0, dim=c(num_samples, n+m))
+w.out     = array(0, dim=c(num_samples, num_mix))
+mu.out    = array(0, dim=c(num_samples, num_mix, num_features))
+Sigma.out = array(0, dim=c(num_samples, num_mix, num_features, num_features))
+logpost   = rep(0, num_samples)
+
+#MCMC Sampler
+for(s in 1:num_samples){
+  # Sample the indicators
+  for(i in (n+1):(n+m)){
+    v = rep(0,num_mix)
+    for(k in 1:num_mix){
+      v[k] = log(w[k]) + mvtnorm::dmvnorm(x[i,], mu[k,], Sigma[k,,], log=TRUE)  #Compute the log of the weights
+    }
+    v = exp(v - max(v))/sum(exp(v - max(v))) #Get weight in a numerically stable manner
+    cc[i] = sample(1:num_mix, 1, replace=TRUE, prob=v) #Sample the mixture of the data point
+  }
+  
+  # Sample the weights
+  w = as.vector(rdirichlet(1, aa + tabulate(cc)))
+  
+  # Sample the means
+  Sigma. = matrix(0, nrow=num_features, ncol=num_features)
+  for(k in 1:num_mix){
+    mk    = sum(cc==k)
+    xsumk = apply(x[cc==k,], 2, sum)
+    DD.st = solve(mk*solve(Sigma[k,,]) + solve(DD))
+    dd.st = DD.st%*%(solve(Sigma[k,,])%*%xsumk + solve(DD)%*%dd)
+    mu[k,] = as.vector(rmvnorm(1,dd.st,DD.st)) #Sampling from multixvariate normal
+  }
+  
+  # Sample the variances
+  xcensumk = array(0, dim=c(num_mix,p,p))
+  for(i in 1:n){
+    xcensumk[cc[i],,] = xcensumk[cc[i],,] + (x[i,] - mu[cc[i],])%*%t(x[i,] - mu[cc[i],])
+  }
+  for(k in 1:num_mix){
+    Sigma[k,,] = riwish(nu + sum(cc==k), SS + xcensumk[k,,]) #Sample inverted Wishart
+  }
+  
+  # Store samples
+  cc.out[s,]      = cc
+  w.out[s,]       = w
+  mu.out[s,,]     = mu
+  Sigma.out[s,,,] = Sigma
+  
+}
+
+
+## Predicted label - use indicator with highest prevalence
+cc.pred = sapply(apply(cc.out[(burn+1):num_samples,], 2, tabulate),which.max)[(n+1):(n+m)] 
+cc.true = labels.test
+sum(!(cc.pred == cc.true)) # Two errors
+
+
+
+# Using the qda and lda functions for comparison
+# qda
+modqda = qda(grouping=as.numeric(labels.known), x=x[1:n,], method="mle")
+ccpredqda = predict(modqda,newdata=x[n+1:m,])
+sum(!(ccpredqda$class == cc.true)) # 3 errors
+
+# lda
+modlda = lda(grouping=as.numeric(labels.known), x=x[1:n], method="mle")
+ccpredlda = predict(modlda,newdata=c[n+1:m])
+sum(!(ccpredlda$class == cc.true)) # 1 error
